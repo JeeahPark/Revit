@@ -94,6 +94,15 @@ def show_detailed_cache(place_id: str, data: dict):
     else:
         print(f"\n⏰ 라스트오더: 없음")
     
+    # 정기휴무
+    regular_holidays = data.get('regular_holidays', [])
+    if regular_holidays:
+        print(f"\n🗓️ 정기휴무:")
+        for i, holiday in enumerate(regular_holidays, 1):
+            print(f"   {i}. {holiday}")
+    else:
+        print(f"\n🗓️ 정기휴무: 없음")
+    
     print("=" * 80)
     input("Enter를 눌러서 계속...")
 
