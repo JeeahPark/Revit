@@ -378,6 +378,169 @@ def process_store_data(data: dict) -> dict:
     return processed_data
 
 
+def process_holiday_data(data: dict) -> dict:
+    """네이버 크롤링 데이터에서 holiday_blocks 생성"""
+    
+    processed_data = data.copy()
+    regular_holiday = data.get('regular_holiday', '')
+    
+    if not regular_holiday:
+        processed_data['holiday_blocks'] = []
+        return processed_data
+    
+    # 정기휴무 텍스트 파싱
+    holiday_blocks = parse_holiday_patterns(regular_holiday)
+    processed_data['holiday_blocks'] = holiday_blocks
+    
+    print(f"\n📅 holiday_blocks 생성:")
+    for i, block in enumerate(holiday_blocks, 1):
+        pattern = block.get('pattern', '매주')
+        days = block.get('days', [])
+        week_number = block.get('week_number')
+        
+        if pattern == '매주':
+            print(f"  {i}. 매주 {', '.join(days)} 휴무")
+        elif pattern == '매월 N째주':
+            print(f"  {i}. 매월 {week_number}째주 {', '.join(days)} 휴무")
+        elif pattern == '매월 마지막주':
+            print(f"  {i}. 매월 마지막주 {', '.join(days)} 휴무")
+    
+    return processed_data
+
+
+def parse_holiday_patterns(holiday_text: str) -> list:
+    """정기휴무 텍스트를 파싱해서 holiday_blocks 생성"""
+    
+    import re
+    holiday_blocks = []
+    
+    if not holiday_text or holiday_text.strip() == '':
+        return holiday_blocks
+    
+    # 다양한 패턴 정의
+    patterns = [
+        # 매월 N째주 패턴
+        (r'매월\s*([첫둘셋넷1-4])째?\s*주\s*([월화수목금토일요일\s,]+)', '매월 N째주'),
+        (r'([첫둘셋넷1-4])째?\s*주\s*([월화수목금토일요일\s,]+)', '매월 N째주'),
+        
+        # 매월 마지막주 패턴
+        (r'매월\s*마지막\s*주\s*([월화수목금토일요일\s,]+)', '매월 마지막주'),
+        (r'마지막\s*주\s*([월화수목금토일요일\s,]+)', '매월 마지막주'),
+        
+        # 매주 패턴 (기본)
+        (r'매주\s*([월화수목금토일요일\s,]+)', '매주'),
+        (r'정기휴무\s*([월화수목금토일요일\s,]+)', '매주'),
+        (r'휴무일?\s*[:\-]?\s*([월화수목금토일요일\s,]+)', '매주'),
+    ]
+    
+    matched_patterns = []
+    
+    # 각 패턴 시도
+    for pattern_regex, pattern_type in patterns:
+        matches = re.findall(pattern_regex, holiday_text)
+        
+        for match in matches:
+            if pattern_type == '매월 N째주':
+                week_indicator = match[0] if isinstance(match, tuple) else match
+                days_text = match[1] if isinstance(match, tuple) else ''
+                
+                # 주차 번호 변환
+                week_mapping = {'첫': 1, '둘': 2, '셋': 3, '넷': 4}
+                try:
+                    week_number = int(week_indicator) if week_indicator.isdigit() else week_mapping.get(week_indicator, 1)
+                    days = extract_days_from_text(days_text)
+                    
+                    if days:
+                        holiday_block = {
+                            'pattern': pattern_type,
+                            'week_number': week_number,
+                            'days': days,
+                            'raw_text': holiday_text
+                        }
+                        matched_patterns.append(holiday_block)
+                        
+                except (ValueError, KeyError):
+                    continue
+                    
+            elif pattern_type == '매월 마지막주':
+                days_text = match if isinstance(match, str) else match[0]
+                days = extract_days_from_text(days_text)
+                
+                if days:
+                    holiday_block = {
+                        'pattern': pattern_type,
+                        'days': days,
+                        'raw_text': holiday_text
+                    }
+                    matched_patterns.append(holiday_block)
+                    
+            else:  # 매주
+                days_text = match if isinstance(match, str) else match[0]
+                days = extract_days_from_text(days_text)
+                
+                if days:
+                    holiday_block = {
+                        'pattern': pattern_type,
+                        'days': days,
+                        'raw_text': holiday_text
+                    }
+                    matched_patterns.append(holiday_block)
+    
+    # 중복 제거 및 우선순위 적용 (구체적인 패턴이 우선)
+    if matched_patterns:
+        # 매월 N째주 > 매월 마지막주 > 매주 순서로 우선순위
+        priority_order = ['매월 N째주', '매월 마지막주', '매주']
+        matched_patterns.sort(key=lambda x: priority_order.index(x['pattern']) if x['pattern'] in priority_order else 999)
+        holiday_blocks = matched_patterns[:1]  # 가장 우선순위 높은 하나만 선택
+    else:
+        # 패턴 매칭 실패시 간단한 요일 추출 시도
+        simple_days = extract_days_from_text(holiday_text)
+        if simple_days:
+            holiday_blocks = [{
+                'pattern': '매주',
+                'days': simple_days,
+                'raw_text': holiday_text
+            }]
+    
+    return holiday_blocks
+
+
+def extract_days_from_text(text: str) -> list:
+    """텍스트에서 요일 추출"""
+    import re
+    
+    # 요일 패턴 매칭
+    day_patterns = [
+        r'월요일?', r'화요일?', r'수요일?', r'목요일?',
+        r'금요일?', r'토요일?', r'일요일?'
+    ]
+    
+    found_days = []
+    
+    for pattern in day_patterns:
+        matches = re.findall(pattern, text)
+        for match in matches:
+            # 첫 글자만 추출 (월요일 → 월, 월 → 월)
+            day = match[0]
+            if day not in found_days:
+                found_days.append(day)
+    
+    # 특별한 케이스들 처리
+    special_cases = {
+        '주말': ['토', '일'],
+        '토일': ['토', '일'], 
+        '일월': ['일', '월']
+    }
+    
+    for keyword, days in special_cases.items():
+        if keyword in text:
+            for day in days:
+                if day not in found_days:
+                    found_days.append(day)
+    
+    return found_days
+
+
 # ──────────────────────────────────────────────
 # 5. 일괄등록 팝업 처리
 # ──────────────────────────────────────────────
@@ -861,9 +1024,11 @@ async def main():
             data = await scrape_naver_detail(context, place_id)
             print(f"\n📦 {data['name']} / {data['address']}")
 
-            # Step 2: 데이터 처리 (time_blocks 생성)
+            # Step 2: 데이터 처리 (time_blocks, holiday_blocks 생성)
             processed_data = process_store_data(data)
+            processed_data = process_holiday_data(processed_data)
             print(f"✅ time_blocks 생성: {len(processed_data.get('time_blocks', []))}개")
+            print(f"✅ holiday_blocks 생성: {len(processed_data.get('holiday_blocks', []))}개")
 
             # Step 3: 로그인 확인 + 등록 페이지 이동
             await ensure_login(page, context)
