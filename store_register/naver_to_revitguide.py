@@ -32,7 +32,31 @@ def save_cache(cache: dict):
 
 def get_cached(place_id: str) -> dict | None:
     cache = load_cache()
-    return cache.get(place_id)
+    data = cache.get(place_id)
+    
+    if not data:
+        return None
+    
+    # 캐시 데이터 유효성 검증
+    # 필수 정보가 모두 있어야 유효한 캐시로 인정
+    essential_fields = ['name', 'phone', 'address']
+    has_all_essential = all(data.get(field, '').strip() for field in essential_fields)
+    
+    # 영업시간도 있어야 함
+    has_hours = bool(data.get('hours', {}))
+    
+    if has_all_essential and has_hours:
+        return data
+    else:
+        missing_fields = [field for field in essential_fields if not data.get(field, '').strip()]
+        missing_info = []
+        if missing_fields:
+            missing_info.extend(missing_fields)
+        if not has_hours:
+            missing_info.append('hours')
+        
+        print(f"  ⚠️ 캐시 무효 (누락: {', '.join(missing_info)}): {place_id} - 다시 크롤링합니다")
+        return None
 
 def set_cache(place_id: str, data: dict):
     cache = load_cache()
@@ -415,26 +439,15 @@ async def main():
     print("  네이버지도 → 레빗가이드 자동 등록")
     print("=" * 50)
 
-    print("\n입력 방식:")
-    print("  1) 식당 이름 검색")
-    print("  2) 네이버지도 URL 입력")
-    choice = input("선택 (1 or 2): ").strip()
-
-    place_id = None
-    need_naver = True
-
-    if choice == "2":
-        url = input("네이버지도 URL: ").strip()
-        place_id = get_place_id_from_url(url)
-        if not place_id:
-            print("❌ URL에서 place_id를 찾지 못했습니다.")
-            return
-        print(f"✅ place_id: {place_id}")
-        # 캐시 확인
-        if get_cached(place_id):
-            need_naver = False
-    else:
-        need_naver = True  # 검색은 항상 네이버 접속 필요
+    # 네이버지도 URL 입력받기
+    url = input("\n네이버지도 URL 입력: ").strip()
+    place_id = get_place_id_from_url(url)
+    
+    if not place_id:
+        print("❌ URL에서 place_id를 찾지 못했습니다.")
+        return
+        
+    print(f"✅ place_id: {place_id}")
 
     # 세션 파일 있으면 로드
     storage_state = None
@@ -464,22 +477,14 @@ async def main():
         page = await context.new_page()
 
         try:
-            # Step 1: place_id 확보 (검색 방식)
-            if choice != "2":
-                query = input("식당 이름 입력: ").strip()
-                place_id = await search_place_id(page, query)
-                if not place_id:
-                    print("❌ place_id를 찾지 못했습니다.")
-                    return
-
-            # Step 2: 크롤링 (캐시 있으면 스킵)
+            # Step 1: 네이버 크롤링
             data = await scrape_naver_detail(context, place_id)
             print(f"\n📦 {data['name']} / {data['address']} / {data['phone']}")
 
-            # Step 3: 로그인 확인 + 등록 페이지 이동
+            # Step 2: 로그인 확인 + 등록 페이지 이동
             await ensure_login(page, context)
 
-            # Step 4: 폼 입력
+            # Step 3: 폼 입력
             await register_store(page, data)
 
         except KeyboardInterrupt:
