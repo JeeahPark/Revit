@@ -75,41 +75,6 @@ def get_place_id_from_url(url: str) -> str | None:
             return m.group(1)
     return None
 
-
-async def search_place_id(page: Page, query: str) -> str | None:
-    print(f"  🔍 '{query}' 검색 중...")
-    await page.goto("https://map.naver.com/", wait_until="domcontentloaded")
-    await asyncio.sleep(2)
-
-    search_input = await page.wait_for_selector("input.input_search", state="visible", timeout=10000)
-    await search_input.click()
-    await search_input.fill(query)
-    await search_input.press("Enter")
-    await asyncio.sleep(3)
-
-    try:
-        iframe_el = await page.wait_for_selector("iframe#searchIframe", timeout=10000)
-        frame = await iframe_el.content_frame()
-        first_item = await frame.wait_for_selector("li.UEzoS a.place_bluelink", timeout=8000)
-        await first_item.click()
-        await asyncio.sleep(2)
-
-        place_id = get_place_id_from_url(page.url)
-        if place_id:
-            print(f"  ✅ place_id: {place_id}")
-            return place_id
-
-        for f in page.frames:
-            if "pcmap.place.naver.com" in f.url:
-                m = re.search(r"/(\d{7,})/", f.url)
-                if m:
-                    print(f"  ✅ place_id (iframe): {m.group(1)}")
-                    return m.group(1)
-    except Exception as e:
-        print(f"  ⚠️ place_id 추출 실패: {e}")
-    return None
-
-
 # ──────────────────────────────────────────────
 # 2. 네이버 크롤링
 # ──────────────────────────────────────────────
@@ -128,7 +93,7 @@ async def scrape_naver_detail(context: BrowserContext, place_id: str) -> dict:
         await page.goto(detail_url, wait_until="domcontentloaded", timeout=20000)
         await asyncio.sleep(4)
 
-        data = {"place_id": place_id, "name": "", "phone": "", "address": "", "category": "", "hours": {}, "break_time": {}, "last_order": {}, "regular_holiday": ""}
+        data = {"place_id": place_id, "name": "", "phone": "", "address": "", "category": "", "hours": {}, "break_time": {}, "last_order": {}}
 
         for sel in ["span.GHAhO", "h2.place_section_header", "span.Fc1rA", "h1"]:
             try:
@@ -240,20 +205,6 @@ async def scrape_naver_detail(context: BrowserContext, place_id: str) -> dict:
         except Exception as e:
             print(f"  ⚠️ 영업시간 파싱 실패: {e}")
 
-        # 정기휴무일 정보 찾기 (영업시간에서 이미 수집된 정보 활용)
-        print("  🗓️ 정기휴무일 정보 수집...")
-        regular_holidays = []
-        for day, time_str in data["hours"].items():
-            if "정기휴무" in time_str or "휴무" in time_str:
-                regular_holidays.append(day)
-        
-        if regular_holidays:
-            holiday_text = f"매주 {', '.join(regular_holidays)}"
-            data["regular_holiday"] = holiday_text
-            print(f"    📅 정기휴무: {holiday_text}")
-        else:
-            print("    📅 정기휴무일 없음")
-
         set_cache(place_id, data)
         return data
     finally:
@@ -316,16 +267,20 @@ def process_store_data(data: dict) -> dict:
     
     if not hours:
         processed_data['time_blocks'] = []
+        processed_data['holiday_blocks'] = []
         return processed_data
     
-    # 요일별 영업시간 정리
+    # 요일별 영업시간/휴무 정리
     day_schedules = {}
+    holiday_raw_texts = {} # 요일별로 발견된 휴무 텍스트 저장
     
     for day, time_str in hours.items():
+        # 1. 휴무 여부 확인
         if '휴무' in time_str or '정기휴무' in time_str:
+            holiday_raw_texts[day] = time_str
             continue
             
-        # 시간 추출 (예: "11:30 ~ 21:00")
+        #2. 영업시간 추출 (예: "11:30 ~ 21:00")
         import re
         time_match = re.search(r'(\d{2}:\d{2})\s*[~-]\s*(\d{2}:\d{2})', time_str)
         if time_match:
@@ -355,161 +310,96 @@ def process_store_data(data: dict) -> dict:
                 }
             
             day_schedules[schedule_key]['days'].append(day)
+            
+    # 3. holiday_blocks 생성
+    processed_data['holiday_blocks'] = parse_holidays_from_hours(holiday_raw_texts)
     
-    # time_blocks 생성
-    time_blocks = []
-    for schedule_data in day_schedules.values():
-        time_block = {
-            'days': schedule_data['days'],
-            **schedule_data['schedule']
-        }
-        time_blocks.append(time_block)
+    # 4. time_blocks 생성
+    processed_data['time_blocks'] = [{**v['schedule'], 'days': v['days']} for v in day_schedules.values()]    
+    # time_blocks = []
+    # for schedule_data in day_schedules.values():
+    #     time_block = {
+    #         'days': schedule_data['days'],
+    #         **schedule_data['schedule']
+    #     }
+    #     time_blocks.append(time_block)
     
-    processed_data['time_blocks'] = time_blocks
+    # processed_data['time_blocks'] = time_blocks
     
-    print(f"\n📋 time_blocks 생성:")
-    for i, block in enumerate(time_blocks, 1):
-        print(f"  {i}. {', '.join(block['days'])}: {block['start_time']} ~ {block['end_time']}")
-        if block['break_start'] and block['break_end']:
-            print(f"     브레이크: {block['break_start']} ~ {block['break_end']}")
-        if block['last_order']:
-            print(f"     라스트오더: {block['last_order']}")
-    
-    return processed_data
-
-
-def process_holiday_data(data: dict) -> dict:
-    """네이버 크롤링 데이터에서 holiday_blocks 생성"""
-    
-    processed_data = data.copy()
-    regular_holiday = data.get('regular_holiday', '')
-    
-    if not regular_holiday:
-        processed_data['holiday_blocks'] = []
-        return processed_data
-    
-    # 정기휴무 텍스트 파싱
-    holiday_blocks = parse_holiday_patterns(regular_holiday)
-    processed_data['holiday_blocks'] = holiday_blocks
-    
-    print(f"\n📅 holiday_blocks 생성:")
-    for i, block in enumerate(holiday_blocks, 1):
-        pattern = block.get('pattern', '매주')
-        days = block.get('days', [])
-        week_number = block.get('week_number')
-        
-        if pattern == '매주':
-            print(f"  {i}. 매주 {', '.join(days)} 휴무")
-        elif pattern == '매월 N째주':
-            print(f"  {i}. 매월 {week_number}째주 {', '.join(days)} 휴무")
-        elif pattern == '매월 마지막주':
-            print(f"  {i}. 매월 마지막주 {', '.join(days)} 휴무")
+    # print(f"\n📋 time_blocks 생성:")
+    # for i, block in enumerate(time_blocks, 1):
+    #     print(f"  {i}. {', '.join(block['days'])}: {block['start_time']} ~ {block['end_time']}")
+    #     if block['break_start'] and block['break_end']:
+    #         print(f"     브레이크: {block['break_start']} ~ {block['break_end']}")
+    #     if block['last_order']:
+    #         print(f"     라스트오더: {block['last_order']}")
     
     return processed_data
 
 
-def parse_holiday_patterns(holiday_text: str) -> list:
-    """정기휴무 텍스트를 파싱해서 holiday_blocks 생성"""
+def parse_holidays_from_hours(holiday_map: dict) -> list:
+    """
+    요일별 휴무 텍스트를 분석하여 {pattern, week_number, days} 구조로 반환합니다.
+    """
+    if not holiday_map:
+        print("    📅 휴무 정보 없음")
+        return []
+
+    print(f"    🔍 휴무 데이터 분석 시작 (대상 요일: {', '.join(holiday_map.keys())})")
     
-    import re
+    week_mapping = {'첫': 1, '둘': 2, '셋': 3, '넷': 4, '다섯': 5, '1': 1, '2': 2, '3': 3, '4': 4, '5': 5}
     holiday_blocks = []
     
-    if not holiday_text or holiday_text.strip() == '':
+    # 분석을 위해 모든 휴무 문구를 하나로 합침
+    full_text = " / ".join(holiday_map.values())
+    print(f"    📝 분석할 전체 문구: {full_text}")
+
+    # 1. 매월 N째주 패턴 분석
+    nth_match = re.search(r'([첫둘셋넷다섯\d,\s]+)번째?\s*주?\s*([월화수목금토일,\s]+)?', full_text)
+    if nth_match and ('번째' in full_text or '째주' in full_text):
+        weeks = re.findall(r'[첫둘셋넷다섯\d]', nth_match.group(1))
+        # 텍스트에 요일이 없으면 실제 휴무로 잡힌 요일(Keys)을 사용
+        extracted_days = extract_days_from_text(nth_match.group(2)) if nth_match.group(2) else list(holiday_map.keys())
+        
+        for w in weeks:
+            if w in week_mapping:
+                block = {
+                    'pattern': '매월 N째주',
+                    'week_number': week_mapping[w],
+                    'days': extracted_days
+                }
+                holiday_blocks.append(block)
+                print(f"    ✅ 파싱 성공 (N째주): {week_mapping[w]}째주 {extracted_days}")
         return holiday_blocks
-    
-    # 다양한 패턴 정의
-    patterns = [
-        # 매월 N째주 패턴
-        (r'매월\s*([첫둘셋넷1-4])째?\s*주\s*([월화수목금토일요일\s,]+)', '매월 N째주'),
-        (r'([첫둘셋넷1-4])째?\s*주\s*([월화수목금토일요일\s,]+)', '매월 N째주'),
-        
-        # 매월 마지막주 패턴
-        (r'매월\s*마지막\s*주\s*([월화수목금토일요일\s,]+)', '매월 마지막주'),
-        (r'마지막\s*주\s*([월화수목금토일요일\s,]+)', '매월 마지막주'),
-        
-        # 매주 패턴 (기본)
-        (r'매주\s*([월화수목금토일요일\s,]+)', '매주'),
-        (r'정기휴무\s*([월화수목금토일요일\s,]+)', '매주'),
-        (r'휴무일?\s*[:\-]?\s*([월화수목금토일요일\s,]+)', '매주'),
-    ]
-    
-    matched_patterns = []
-    
-    # 각 패턴 시도
-    for pattern_regex, pattern_type in patterns:
-        matches = re.findall(pattern_regex, holiday_text)
-        
-        for match in matches:
-            if pattern_type == '매월 N째주':
-                week_indicator = match[0] if isinstance(match, tuple) else match
-                days_text = match[1] if isinstance(match, tuple) else ''
-                
-                # 주차 번호 변환
-                week_mapping = {'첫': 1, '둘': 2, '셋': 3, '넷': 4}
-                try:
-                    week_number = int(week_indicator) if week_indicator.isdigit() else week_mapping.get(week_indicator, 1)
-                    days = extract_days_from_text(days_text)
-                    
-                    if days:
-                        holiday_block = {
-                            'pattern': pattern_type,
-                            'week_number': week_number,
-                            'days': days,
-                            'raw_text': holiday_text
-                        }
-                        matched_patterns.append(holiday_block)
-                        
-                except (ValueError, KeyError):
-                    continue
-                    
-            elif pattern_type == '매월 마지막주':
-                days_text = match if isinstance(match, str) else match[0]
-                days = extract_days_from_text(days_text)
-                
-                if days:
-                    holiday_block = {
-                        'pattern': pattern_type,
-                        'days': days,
-                        'raw_text': holiday_text
-                    }
-                    matched_patterns.append(holiday_block)
-                    
-            else:  # 매주
-                days_text = match if isinstance(match, str) else match[0]
-                days = extract_days_from_text(days_text)
-                
-                if days:
-                    holiday_block = {
-                        'pattern': pattern_type,
-                        'days': days,
-                        'raw_text': holiday_text
-                    }
-                    matched_patterns.append(holiday_block)
-    
-    # 중복 제거 및 우선순위 적용 (구체적인 패턴이 우선)
-    if matched_patterns:
-        # 매월 N째주 > 매월 마지막주 > 매주 순서로 우선순위
-        priority_order = ['매월 N째주', '매월 마지막주', '매주']
-        matched_patterns.sort(key=lambda x: priority_order.index(x['pattern']) if x['pattern'] in priority_order else 999)
-        holiday_blocks = matched_patterns[:1]  # 가장 우선순위 높은 하나만 선택
-    else:
-        # 패턴 매칭 실패시 간단한 요일 추출 시도
-        simple_days = extract_days_from_text(holiday_text)
-        if simple_days:
-            holiday_blocks = [{
-                'pattern': '매주',
-                'days': simple_days,
-                'raw_text': holiday_text
-            }]
-    
+
+    # 2. 매월 마지막주 패턴 분석
+    if '마지막주' in full_text:
+        last_match = re.search(r'마지막주\s*([월화수목금토일,\s]*)', full_text)
+        extracted_days = extract_days_from_text(last_match.group(1)) if last_match and last_match.group(1).strip() else list(holiday_map.keys())
+        block = {'pattern': '매월 마지막주', 'days': extracted_days}
+        holiday_blocks.append(block)
+        print(f"    ✅ 파싱 성공 (마지막주): {extracted_days}")
+        return holiday_blocks
+
+    # 3. 매주 패턴 (기본)
+    # 각 요일별로 텍스트를 분석하는 대신, 휴무로 분류된 모든 요일을 하나의 '매주' 블록으로 묶음
+    actual_days = list(holiday_map.keys())
+    if actual_days:
+        block = {'pattern': '매주', 'days': actual_days}
+        holiday_blocks.append(block)
+        print(f"    ✅ 파싱 성공 (매주): {actual_days}")
+
     return holiday_blocks
 
-
 def extract_days_from_text(text: str) -> list:
-    """텍스트에서 요일 추출"""
+    """
+    텍스트에서 요일을 추출하며, '주말', '토일' 등 특별 케이스를 포함합니다.
+    """
     import re
+    if not text:
+        return []
     
-    # 요일 패턴 매칭
+    # 1. 요일 패턴 매칭 (월요일, 월 등)
     day_patterns = [
         r'월요일?', r'화요일?', r'수요일?', r'목요일?',
         r'금요일?', r'토요일?', r'일요일?'
@@ -517,15 +407,15 @@ def extract_days_from_text(text: str) -> list:
     
     found_days = []
     
+    # 정규표현식으로 찾은 뒤, 첫 글자(요일)만 추출
     for pattern in day_patterns:
         matches = re.findall(pattern, text)
         for match in matches:
-            # 첫 글자만 추출 (월요일 → 월, 월 → 월)
-            day = match[0]
+            day = match[0] # '월요일' -> '월'
             if day not in found_days:
                 found_days.append(day)
     
-    # 특별한 케이스들 처리
+    # 2. 특별한 케이스들 처리 (기존 로직 유지)
     special_cases = {
         '주말': ['토', '일'],
         '토일': ['토', '일'], 
@@ -538,8 +428,16 @@ def extract_days_from_text(text: str) -> list:
                 if day not in found_days:
                     found_days.append(day)
     
-    return found_days
-
+    # 3. [중요] 최종 필터링
+    # '매주'의 '주'가 '주말' 처리에 의해 추가되거나 오인되는 것을 방지하기 위해 
+    # 실제 요일 글자(월~일)만 남깁니다.
+    valid_day_names = ['월', '화', '수', '목', '금', '토', '일']
+    final_days = [d for d in found_days if d in valid_day_names]
+    
+    # 요일 순서대로 정렬 (월~일)
+    final_days.sort(key=lambda x: valid_day_names.index(x))
+    
+    return final_days
 
 # ──────────────────────────────────────────────
 # 5. 일괄등록 팝업 처리
@@ -606,6 +504,124 @@ async def handle_batch_registration(page: Page, time_blocks: list):
             continue
     
     return True
+
+
+# ──────────────────────────────────────────────
+# 7. 정기휴무 등록
+# ──────────────────────────────────────────────
+
+async def handle_holiday_registration(page: Page, holiday_blocks: list):
+    """holiday_blocks 데이터를 사용해서 정기휴무 등록"""
+    
+    # 정기휴무 추가 버튼 selector
+    add_holiday_btn_selector = "#detail-info > div.space-y-4 > div:nth-child(6) > div > button"
+    
+    for i, block in enumerate(holiday_blocks):
+        pattern = block.get('pattern', '매주')
+        days = block.get('days', [])
+        week_number = block.get('week_number')
+        
+        print(f"\n  📅 정기휴무 블록 {i+1}/{len(holiday_blocks)} 등록: {pattern} {', '.join(days)}")
+        
+        try:
+            # 정기휴무 추가 버튼 클릭
+            add_btn = page.locator(add_holiday_btn_selector)
+            await add_btn.click()
+            await asyncio.sleep(0.5)
+            print("    ✅ 정기휴무 추가 버튼 클릭")
+            
+            # 블록 번호 계산 (첫번째는 2, 두번째부터는 3, 4, 5...)
+            block_index = i + 2
+            
+            # 반복 주기 선택
+            await select_holiday_pattern(page, pattern, week_number, block_index)
+            
+            # 요일 선택  
+            await select_holiday_days(page, days, block_index)
+            
+            print(f"    ✅ 정기휴무 블록 {i+1} 등록 완료")
+            
+        except Exception as e:
+            print(f"    ❌ 정기휴무 블록 {i+1} 등록 실패: {e}")
+            continue
+    
+    return True
+
+
+async def select_holiday_pattern(page: Page, pattern: str, week_number: int, block_index: int):
+    """정기휴무 패턴 선택 (매주/매월N째주/매월마지막주)"""
+    
+    # 패턴별 버튼 selector (동적 블록 인덱스 적용)
+    base_selector = f"#detail-info > div.space-y-4 > div:nth-child(6) > div:nth-child({block_index})"
+    
+    pattern_selectors = {
+        '매주': f"{base_selector} > div.space-y-2.mb-3 > div.flex.rounded-lg.bg-white.p-1 > button:nth-child(1)",
+        '매월 N째주': f"{base_selector} > div.space-y-2.mb-3 > div.flex.rounded-lg.bg-white.p-1 > button:nth-child(2)", 
+        '매월 마지막주': f"{base_selector} > div.space-y-2.mb-3 > div.flex.rounded-lg.bg-white.p-1 > button:nth-child(3)"
+    }
+    
+    try:
+        pattern_selector = pattern_selectors.get(pattern, pattern_selectors['매주'])
+        pattern_btn = page.locator(pattern_selector)
+        await pattern_btn.click()
+        await asyncio.sleep(0.3)
+        print(f"    📅 반복 패턴 선택: {pattern}")
+        
+        # 매월 N째주인 경우 주차 선택
+        if pattern == '매월 N째주' and week_number:
+            await select_week_number(page, week_number, block_index)
+            
+    except Exception as e:
+        print(f"    ⚠️ 반복 패턴 선택 실패: {e}")
+
+
+async def select_week_number(page: Page, week_number: int, block_index: int):
+    """매월 N째주 선택시 주차 번호 선택"""
+    
+    try:
+        # 주차 선택 버튼 selector
+        week_selector = f"#detail-info > div.space-y-4 > div:nth-child(6) > div:nth-child({block_index}) > div:nth-child(4) > div.flex.gap-2 > button:nth-child({week_number})"
+        
+        week_btn = page.locator(week_selector)
+        await week_btn.click()
+        await asyncio.sleep(0.3)
+        print(f"    📝 주차 선택: {week_number}째주")
+        
+    except Exception as e:
+        print(f"    ⚠️ 주차 선택 실패: {e}")
+
+
+async def select_holiday_days(page: Page, days: list, block_index: int):
+    """정기휴무 요일 선택"""
+    
+    # 요일 매핑
+    day_mapping = {
+        '월': 1, '화': 2, '수': 3, '목': 4, '금': 5, '토': 6, '일': 7,
+        '월요일': 1, '화요일': 2, '수요일': 3, '목요일': 4, '금요일': 5, '토요일': 6, '일요일': 7
+    }
+    
+    try:
+        for day in days:
+            day_num = day_mapping.get(day)
+            if day_num:
+                # 요일 버튼 selector (동적 블록 인덱스 적용)
+                day_selector = f"#detail-info > div.space-y-4 > div:nth-child(6) > div:nth-child({block_index}) > div.space-y-2.mb-4 > div.flex.justify-between.gap-1 > button:nth-child({day_num})"
+                
+                day_btn = page.locator(day_selector)
+                
+                # 버튼이 이미 선택되었는지 확인 (bg-black 클래스)
+                button_class = await day_btn.get_attribute('class')
+                if 'bg-black' not in str(button_class):
+                    await day_btn.click()
+                    await asyncio.sleep(0.2)
+                    print(f"    ✅ {day} 선택")
+                else:
+                    print(f"    📝 {day} 이미 선택됨")
+            else:
+                print(f"    ❌ 알 수 없는 요일: {day}")
+                
+    except Exception as e:
+        print(f"    ⚠️ 요일 선택 실패: {e}")
 
 
 async def select_days_in_popup(page: Page, days: list):
@@ -744,6 +760,14 @@ async def register_store(page: Page, data: dict):
         await handle_batch_registration(page, time_blocks)
     else:
         print("  ⚠️ time_blocks 정보가 없어 영업시간 자동입력 건너뜀")
+    
+    # 정기휴무일 등록
+    holiday_blocks = data.get('holiday_blocks', [])
+    if holiday_blocks:
+        print(f"\n📅 정기휴무 등록 처리 ({len(holiday_blocks)}개 블록)")
+        await handle_holiday_registration(page, holiday_blocks)
+    else:
+        print("  ⚠️ holiday_blocks 정보가 없어 정기휴무 자동입력 건너뜀")
 
 
 async def fill_basic_info(page: Page, data: dict):
@@ -1026,7 +1050,6 @@ async def main():
 
             # Step 2: 데이터 처리 (time_blocks, holiday_blocks 생성)
             processed_data = process_store_data(data)
-            processed_data = process_holiday_data(processed_data)
             print(f"✅ time_blocks 생성: {len(processed_data.get('time_blocks', []))}개")
             print(f"✅ holiday_blocks 생성: {len(processed_data.get('holiday_blocks', []))}개")
 
