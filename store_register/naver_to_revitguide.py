@@ -129,7 +129,7 @@ async def scrape_naver_detail(context: BrowserContext, place_id: str) -> dict:
         await page.goto(detail_url, wait_until="domcontentloaded", timeout=20000)
         await asyncio.sleep(4)
 
-        data = {"place_id": place_id, "name": "", "phone": "", "address": "", "category": "", "hours": {}}
+        data = {"place_id": place_id, "name": "", "phone": "", "address": "", "category": "", "hours": {}, "break_time": {}, "last_order": {}, "regular_holiday": ""}
 
         for sel in ["span.GHAhO", "h2.place_section_header", "span.Fc1rA", "h1"]:
             try:
@@ -190,10 +190,70 @@ async def scrape_naver_detail(context: BrowserContext, place_id: str) -> dict:
             time_items = await page.locator("div.H3ua4").all_inner_texts()
             for day, time_str in zip(day_items, time_items):
                 if day.strip() and time_str.strip():
-                    data["hours"][day.strip()] = time_str.strip()
-                    print(f"  {day.strip()}: {time_str.strip()}")
+                    day = day.strip()
+                    time_str = time_str.strip()
+                    data["hours"][day] = time_str
+                    print(f"  {day}: {time_str}")
+                    
+                    # 브레이크타임 추출 (더 유연한 패턴)
+                    if "브레이크타임" in time_str:
+                        # "15:00 - 17:00 브레이크타임" 패턴 처리
+                        break_patterns = [
+                            r'([0-9]{1,2}:[0-9]{2})\s*[-~]\s*([0-9]{1,2}:[0-9]{2})\s*브레이크타임',
+                            r'브레이크타임\s*([0-9]{1,2}:[0-9]{2})\s*[-~]\s*([0-9]{1,2}:[0-9]{2})'
+                        ]
+                        for pattern in break_patterns:
+                            break_match = re.search(pattern, time_str)
+                            if break_match:
+                                break_time = f"{break_match.group(1)} ~ {break_match.group(2)}"
+                                data["break_time"][day] = break_time
+                                print(f"    🍽️ 브레이크타임: {break_time}")
+                                break
+                    
+                    # 라스트오더 추출 (더 유연한 패턴)
+                    if any(keyword in time_str for keyword in ["라스트오더", "L.O", "주문마감"]):
+                        # "14:30, 19:30 라스트오더" 패턴도 처리
+                        lo_patterns = [
+                            r'([0-9]{1,2}:[0-9]{2}),?\s*([0-9]{1,2}:[0-9]{2})\s*라스트오더',
+                            r'라스트오더\s*([0-9]{1,2}:[0-9]{2})',
+                            r'([0-9]{1,2}:[0-9]{2})\s*라스트오더',
+                            r'L\.?O\.?\s*([0-9]{1,2}:[0-9]{2})',
+                            r'주문마감\s*([0-9]{1,2}:[0-9]{2})'
+                        ]
+                        last_orders = []
+                        
+                        # 쉼표로 구분된 여러 시간 찾기
+                        comma_match = re.search(r'([0-9]{1,2}:[0-9]{2}),\s*([0-9]{1,2}:[0-9]{2})\s*라스트오더', time_str)
+                        if comma_match:
+                            last_orders.extend([comma_match.group(1), comma_match.group(2)])
+                        else:
+                            # 단일 시간 패턴들 시도
+                            for pattern in lo_patterns:
+                                matches = re.findall(pattern, time_str)
+                                last_orders.extend(matches)
+                        
+                        if last_orders:
+                            # 여러 시간이 있으면 가장 늦은 시간 선택
+                            latest_time = max(last_orders)
+                            data["last_order"][day] = latest_time
+                            print(f"    ⏰ 라스트오더: {latest_time}" + (f" (총 {len(last_orders)}개 중 최신)" if len(last_orders) > 1 else ""))
+
         except Exception as e:
             print(f"  ⚠️ 영업시간 파싱 실패: {e}")
+
+        # 정기휴무일 정보 찾기 (영업시간에서 이미 수집된 정보 활용)
+        print("  🗓️ 정기휴무일 정보 수집...")
+        regular_holidays = []
+        for day, time_str in data["hours"].items():
+            if "정기휴무" in time_str or "휴무" in time_str:
+                regular_holidays.append(day)
+        
+        if regular_holidays:
+            holiday_text = f"매주 {', '.join(regular_holidays)}"
+            data["regular_holiday"] = holiday_text
+            print(f"    📅 정기휴무: {holiday_text}")
+        else:
+            print("    📅 정기휴무일 없음")
 
         set_cache(place_id, data)
         return data
