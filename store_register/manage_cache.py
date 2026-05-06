@@ -94,10 +94,6 @@ def show_detailed_cache(place_id: str, data: dict):
     else:
         print(f"\n⏰ 라스트오더: 없음")
     
-    # 정기휴무일
-    regular_holiday = data.get('regular_holiday', '')
-    print(f"\n📅 정기휴무: {regular_holiday if regular_holiday else '없음'}")
-    
     print("=" * 80)
     input("Enter를 눌러서 계속...")
 
