@@ -752,7 +752,7 @@ async def register_store(page: Page, data: dict):
     
     # 기본 정보 입력 (기존 로직)
     await fill_basic_info(page, data)
-    
+
     # 시간 정보가 있으면 일괄등록 처리
     time_blocks = data.get('time_blocks', [])
     if time_blocks:
@@ -788,26 +788,54 @@ async def fill_basic_info(page: Page, data: dict):
             print("    ✅ 자동완성 드롭다운 닫기")
         except:
             pass
-    
-    # 주소
+
+
+    # 📍 주소 입력 및 검색 로직
     if data.get('address'):
+        address_text = data['address']
         try:
-            # 정확한 주소 입력 selector 사용
-            address_input = page.locator('#_r_5q_-form-item > input')
-            await address_input.fill(data['address'])
-            print(f"  📍 주소: {data['address']}")
+            print(f"  🔍 주소 검색 시도: {address_text}")
+            
+            # 1. '주소 검색' 버튼 클릭 (텍스트 기반 로케이터)
+            #의 구조를 유지하되 사용자 중심 로케이터로 변경
+            search_trigger = page.get_by_role("button", name="주소 검색")
+            await search_trigger.wait_for(state="visible", timeout=5000)
+            await search_trigger.click(force=True)
+            await asyncio.sleep(1.5)
+            
+            # 2. 주소 검색창 입력 (제공된 placeholder 전체 활용)
+            # HTML: "주소나 장소명을 입력하세요 (예: 역삼동 123-45, 강남역)"
+            search_input = page.get_by_placeholder("주소나 장소명을 입력하세요")
+            await search_input.wait_for(state="visible", timeout=3000)
+            await search_input.fill(address_text)
+            await search_input.press("Enter")
+            await asyncio.sleep(2)
+            
+            # 3. 검색 결과 선택 (서랍 옵션 선택)
+            # 제공해주신 선택서랍 element의 클래스 조합을 사용합니다.
+            result_item = page.locator("div.pointer-events-auto.flex.w-full.cursor-pointer").first
+            
+            if await result_item.count() > 0:
+                await result_item.click()
+                print(f"    ✅ 검색 결과에서 주소 선택 완료")
+            else:
+                # 검색 결과가 없는 경우 Escape로 창을 닫고 예외 발생시켜 직접 입력으로 유도
+                print("    ⚠️ 검색 결과가 없습니다. 직접 입력으로 전환합니다.")
+                await page.keyboard.press("Escape")
+                raise Exception("No search result found")
+
         except Exception as e:
-            print(f"  ⚠️ 주소 입력 실패: {e}")
-            # 대안 selector들 시도
+            print(f"  ⚠️ 주소 검색 자동화 실패 ({e}), 직접 입력 방식으로 전환")
             try:
-                await page.locator('input[placeholder*="주소"]').fill(data['address'])
-                print(f"  📍 주소 (대안): {data['address']}")
-            except:
-                pass
-    
+                # 4. 직접 입력 Fallback (name="place.formatted" 속성 활용)
+                # HTML: <input name="place.formatted" ...>
+                direct_input = page.locator('input[name="place.formatted"]')
+                await direct_input.fill(address_text)
+                print(f"    📍 주소 직접 입력 완료: {address_text}")
+            except Exception as final_e:
+                print(f"    ❌ 주소 입력 최종 실패: {final_e}")
+
     await asyncio.sleep(1)
-
-
 # ──────────────────────────────────────────────
 # 4. 시간 picker 입력
 # ──────────────────────────────────────────────
