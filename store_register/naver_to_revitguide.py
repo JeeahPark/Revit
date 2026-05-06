@@ -1034,16 +1034,6 @@ async def main():
     print("  네이버지도 → 레빗가이드 자동 등록")
     print("=" * 50)
 
-    # 네이버지도 URL 입력받기
-    url = input("\n네이버지도 URL 입력: ").strip()
-    place_id = get_place_id_from_url(url)
-    
-    if not place_id:
-        print("❌ URL에서 place_id를 찾지 못했습니다.")
-        return
-        
-    print(f"✅ place_id: {place_id}")
-
     # 세션 파일 있으면 로드
     storage_state = None
     if SESSION_FILE.exists():
@@ -1071,32 +1061,56 @@ async def main():
         context = await browser.new_context(**context_kwargs)
         page = await context.new_page()
 
-        try:
-            # Step 1: 네이버 크롤링
-            data = await scrape_naver_detail(context, place_id)
-            print(f"\n📦 {data['name']} / {data['address']}")
+       # 🔄 전체 프로세스 반복 루프
+        while True:
+            print("\n" + "-" * 30)
+            
+            # 1️⃣ URL 입력 및 예외 처리 (유효한 ID가 나올 때까지 반복)
+            place_id = None
+            while not place_id:
+                url = input("📍 네이버지도 URL 입력 (종료하려면 'q' 입력): ").strip()
+                
+                if url.lower() == 'q':
+                    print("👋 프로그램을 종료합니다.")
+                    await context.close()
+                    await browser.close()
+                    return
 
-            # Step 2: 데이터 처리 (time_blocks, holiday_blocks 생성)
-            processed_data = process_store_data(data)
-            print(f"✅ time_blocks 생성: {len(processed_data.get('time_blocks', []))}개")
-            print(f"✅ holiday_blocks 생성: {len(processed_data.get('holiday_blocks', []))}개")
+                place_id = get_place_id_from_url(url)
+                if not place_id:
+                    print("❌ URL 형식이 잘못되었습니다. 다시 입력해주세요. (예: https://naver.me/... 또는 place/숫자)")
 
-            # Step 3: 로그인 확인 + 등록 페이지 이동
-            await ensure_login(page, context)
+            # 2️⃣ 등록 프로세스 실행
+            try:
+                print(f"🚀 등록 시작 (ID: {place_id})...")
+                
+                # Step 1: 네이버 크롤링
+                data = await scrape_naver_detail(context, place_id)
+                
+                # Step 2: 데이터 통합 처리 (Lumi님의 최신 로직 적용)
+                processed_data = process_store_data(data)
+                
+                # Step 3: 로그인 확인 + 등록 페이지 이동
+                await ensure_login(page, context)
 
-            # Step 4: 폼 입력
-            await register_store(page, processed_data)
+                # Step 4: 폼 입력 (기본 정보 + 영업시간 + 정기휴무)
+                await register_store(page, processed_data)
+                
+                print(f"\n✨ '{data['name']}' 등록 절차가 완료되었습니다!")
 
-        except KeyboardInterrupt:
-            print("\n⛔ 취소")
-        except Exception as e:
-            print(f"\n❌ 오류: {e}")
-            import traceback
-            traceback.print_exc()
-        finally:
-            input("\n브라우저를 닫으려면 엔터...")
-            await context.close()
-            await browser.close()
+            except Exception as e:
+                print(f"\n❌ 작업 중 오류 발생: {e}")
+                # 오류가 발생해도 루프를 돌기 위해 중단하지 않음
+
+            # 3️⃣ 추가 등록 여부 확인
+            print("\n" + "-" * 30)
+            choice = input("❓ 식당을 추가로 등록하시겠습니까? (y/n): ").strip().lower()
+            if choice != 'y':
+                print("👋 모든 작업을 마치고 프로그램을 종료합니다.")
+                break
+
+        await context.close()
+        await browser.close()
 
 
 if __name__ == "__main__":
