@@ -286,9 +286,11 @@ async def ensure_login(page: Page, context: BrowserContext):
     print("   완료 후 엔터를 눌러주세요...")
     input()
 
-    # 세션 저장
+    # 세션 저장 (보안 강화)
     storage = await context.storage_state()
     SESSION_FILE.write_text(json.dumps(storage))
+    # 파일 권한 설정 (소유자만 읽기/쓰기)
+    SESSION_FILE.chmod(0o600)
     print(f"  💾 세션 저장: {SESSION_FILE}")
 
     # 등록 페이지로 이동
