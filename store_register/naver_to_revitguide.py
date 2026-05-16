@@ -1404,13 +1404,6 @@ async def main():
                 print(f"\n❌ 작업 중 오류 발생: {e}")
                 # 오류가 발생해도 루프를 돌기 위해 중단하지 않음
 
-            # 3️⃣ 추가 등록 여부 확인
-            print("\n" + "-" * 30)
-            choice = input("❓ 식당을 추가로 등록하시겠습니까? (y/n): ").strip().lower()
-            if choice != 'y':
-                print("👋 모든 작업을 마치고 프로그램을 종료합니다.")
-                break
-
         await context.close()
         await browser.close()
 
