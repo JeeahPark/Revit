@@ -91,7 +91,11 @@ async def scrape_naver_detail(context: BrowserContext, place_id: str) -> dict:
     page = await context.new_page()
     try:
         await page.goto(detail_url, wait_until="domcontentloaded", timeout=20000)
-        await asyncio.sleep(4)
+        # 영업시간 섹션(펼치기 버튼 또는 시간 텍스트)이 로드될 때까지 대기
+        try:
+            await page.wait_for_selector("span._UCia, span.i8cJw", timeout=12000)
+        except:
+            await asyncio.sleep(1)
 
         data = {"place_id": place_id, "name": "", "phone": "", "address": "", "category": "", "hours": {}}
 
@@ -134,17 +138,14 @@ async def scrape_naver_detail(context: BrowserContext, place_id: str) -> dict:
         # 영업시간 펼치기
         print("  ⏰ 영업시간 펼치기 시도...")
         try:
-            await page.wait_for_selector("span._UCia", timeout=8000)
-            spans = await page.locator("span._UCia").all()
-            for span in spans:
-                try:
-                    blind_text = await span.locator("span.place_blind").inner_text(timeout=1000)
-                    if "펼쳐보기" in blind_text:
-                        await span.click(timeout=3000)
-                        await asyncio.sleep(2)
-                        print("  ✅ 펼쳐보기 클릭")
-                        break
-                except: continue
+            expand_btn = page.locator("span._UCia").filter(has_text="펼쳐보기")
+            await expand_btn.wait_for(state="visible", timeout=8000)
+            await expand_btn.click(timeout=3000)
+            try:
+                await page.wait_for_selector("span.i8cJw", timeout=3000)
+            except:
+                await asyncio.sleep(0.5)
+            print("  ✅ 펼쳐보기 클릭")
         except Exception as e:
             print(f"  ⚠️ 펼치기 실패: {e}")
 
@@ -316,26 +317,40 @@ def process_store_data(data: dict) -> dict:
 
 
 def expand_daily_schedule(raw_hours: dict) -> dict:
-    """'매일' 패턴을 7개 요일로 확장"""
-    
-    if "매일" in raw_hours:
-        daily_schedule = raw_hours["매일"]
+    """'매일' 패턴을 7개 요일로 확장 + 부가표기 요일 정규화 ('일(5/24)' → '일')"""
+
+    # 1단계: 정규 요일 키('월'~'일', '매일')를 먼저 수집 → 부가표기보다 우선
+    normalized = {}
+    for day, time_str in raw_hours.items():
+        if day == '매일' or re.match(r'^[월화수목금토일]$', day):
+            normalized[day] = time_str
+
+    # 2단계: 부가표기 항목('일(5/24)' 등)은 해당 요일이 없을 때만 채움
+    for day, time_str in raw_hours.items():
+        if day in normalized:
+            continue
+        m = re.match(r'^([월화수목금토일])', day.strip())
+        if m:
+            base_day = m.group(1)
+            if base_day not in normalized:
+                normalized[base_day] = time_str
+                print(f"  ℹ️ 부가표기 요일 정규화: '{day}' → '{base_day}'")
+            else:
+                print(f"  ℹ️ '{day}' 건너뜀 ('{base_day}' 정규 항목 우선)")
+
+    # 3단계: '매일' 패턴 확장
+    if "매일" in normalized:
+        daily_schedule = normalized["매일"]
         print(f"  🔄 '매일' 패턴 발견, 7개 요일로 확장: {daily_schedule}")
-        
-        expanded = {}
-        # 기존 "매일" 아닌 항목들 복사
-        for day, time_str in raw_hours.items():
-            if day != "매일":
-                expanded[day] = time_str
-        
-        # 7개 요일로 확장
+
+        expanded = {k: v for k, v in normalized.items() if k != "매일"}
         for day in ['월', '화', '수', '목', '금', '토', '일']:
             expanded[day] = daily_schedule
-        
+
         print(f"  ✅ 확장 완료: {len([d for d in expanded.keys() if d in ['월','화','수','목','금','토','일']])}개 요일")
         return expanded
-    
-    return raw_hours
+
+    return normalized
 
 
 def parse_all_time_info(expanded_hours: dict) -> dict:
@@ -713,8 +728,8 @@ async def handle_batch_registration(page: Page, time_blocks: list):
         
         # 팝업 열림 대기
         await page.wait_for_selector('[role="dialog"]', timeout=5000)
-        await asyncio.sleep(1)
-        
+        await asyncio.sleep(0.3)
+
     except Exception as e:
         print(f"  ❌ 일괄등록 버튼 클릭 실패: {e}")
         return False
@@ -734,7 +749,7 @@ async def handle_batch_registration(page: Page, time_blocks: list):
             try:
                 apply_btn = page.locator('[role="dialog"] button:has-text("적용")')
                 await apply_btn.click()
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.3)
                 print(f"    ✅ 적용 버튼 클릭 완료")
             except Exception as e:
                 print(f"    ⚠️ 적용 버튼 클릭 실패: {e}")
@@ -742,7 +757,7 @@ async def handle_batch_registration(page: Page, time_blocks: list):
                 try:
                     alt_btn = page.locator('[role="dialog"] div.sm\\:flex-row button').last
                     await alt_btn.click()
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.3)
                     print(f"    ✅ 대안 버튼 클릭 완료")
                 except:
                     print(f"    ❌ 모든 버튼 클릭 실패")
@@ -753,7 +768,7 @@ async def handle_batch_registration(page: Page, time_blocks: list):
             if i < len(time_blocks) - 1:
                 await batch_btn.click()
                 await page.wait_for_selector('[role="dialog"]', timeout=5000)
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.3)
                 
         except Exception as e:
             print(f"  ❌ time_block {i+1} 처리 실패: {e}")
@@ -783,7 +798,7 @@ async def handle_holiday_registration(page: Page, holiday_blocks: list):
             # 정기휴무 추가 버튼 클릭
             add_btn = page.locator(add_holiday_btn_selector)
             await add_btn.click()
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.2)
             print("    ✅ 정기휴무 추가 버튼 클릭")
             
             # 블록 번호 계산 (첫번째는 2, 두번째부터는 3, 4, 5...)
@@ -838,7 +853,7 @@ async def select_holiday_pattern(page: Page, pattern: str, week_number: int, blo
         
         if button_count > 0:
             await pattern_btn.click()
-            await asyncio.sleep(0.5)  # 대기시간 증가
+            await asyncio.sleep(0.2)
             print(f"    ✅ 반복 패턴 선택 완료: {ui_pattern}")
             
             # 매월 N째주인 경우 주차 선택
@@ -870,16 +885,16 @@ async def select_week_number(page: Page, week_number: int, block_index: int):
         
         # 버튼이 보이고 클릭 가능할 때까지 대기
         await week_btn.wait_for(state="visible", timeout=5000)
-        await asyncio.sleep(1)  # 추가 대기 시간 (UI 활성화)
-        
+        await asyncio.sleep(0.2)
+
         # 버튼 활성화 상태 확인
         is_disabled = await week_btn.get_attribute("disabled")
         if is_disabled:
             print(f"    ⚠️ {week_number}째주 버튼이 비활성화 상태입니다. 추가 대기...")
-            await asyncio.sleep(1)
-        
+            await asyncio.sleep(0.5)
+
         await week_btn.click()
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.1)
         print(f"    ✅ 주차 선택 완료: {week_number}째주")
         
     except Exception as e:
@@ -915,7 +930,7 @@ async def select_holiday_days(page: Page, days: list, block_index: int):
                 button_class = await day_btn.get_attribute('class')
                 if 'bg-black' not in str(button_class):
                     await day_btn.click()
-                    await asyncio.sleep(0.2)
+                    await asyncio.sleep(0.1)
                     print(f"    ✅ {day} 선택")
                 else:
                     print(f"    📝 {day} 이미 선택됨")
@@ -965,7 +980,7 @@ async def select_days_in_popup(page: Page, days: list):
         
         if await all_days_checkbox.is_checked():
             await all_days_checkbox.click()
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.2)
             print("    📅 '모든 요일' 해제 완료")
         else:
             print("    📅 '모든 요일'이 이미 해제됨")
@@ -983,7 +998,7 @@ async def select_days_in_popup(page: Page, days: list):
                 
                 if not await day_checkbox.is_checked():
                     await day_checkbox.click()
-                    await asyncio.sleep(0.3)
+                    await asyncio.sleep(0.1)
                     print(f"    ✅ {day} 선택 완료")
                 else:
                     print(f"    📝 {day} 이미 선택됨")
@@ -1082,11 +1097,11 @@ async def fill_basic_info(page: Page, data: dict):
         print(f"  📝 매장명: {data['name']}")
         
         # 매장명 입력 후 자동완성 드롭다운을 없애기 위해 주변 클릭
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.2)
         try:
             # 페이지 빈 공간 클릭 (드롭다운 닫기)
             await page.click('body', position={'x': 100, 'y': 100})
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.1)
             print("    ✅ 자동완성 드롭다운 닫기")
         except:
             pass
@@ -1103,16 +1118,20 @@ async def fill_basic_info(page: Page, data: dict):
             search_trigger = page.get_by_role("button", name="주소 검색")
             await search_trigger.wait_for(state="visible", timeout=5000)
             await search_trigger.click(force=True)
-            await asyncio.sleep(1.5)
-            
+            await asyncio.sleep(0.5)
+
             # 2. 주소 검색창 입력 (제공된 placeholder 전체 활용)
             # HTML: "주소나 장소명을 입력하세요 (예: 역삼동 123-45, 강남역)"
             search_input = page.get_by_placeholder("주소나 장소명을 입력하세요")
             await search_input.wait_for(state="visible", timeout=3000)
             await search_input.fill(address_text)
             await search_input.press("Enter")
-            await asyncio.sleep(2)
-            
+            # 검색 결과 요소 등장 대기
+            try:
+                await page.wait_for_selector("div.pointer-events-auto.flex.w-full.cursor-pointer", timeout=5000)
+            except:
+                await asyncio.sleep(1.5)
+
             # 3. 검색 결과 선택 (서랍 옵션 선택)
             # 제공해주신 선택서랍 element의 클래스 조합을 사용합니다.
             result_item = page.locator("div.pointer-events-auto.flex.w-full.cursor-pointer").first
@@ -1137,7 +1156,7 @@ async def fill_basic_info(page: Page, data: dict):
             except Exception as final_e:
                 print(f"    ❌ 주소 입력 최종 실패: {final_e}")
 
-    await asyncio.sleep(1)
+    await asyncio.sleep(0.3)
 # ──────────────────────────────────────────────
 # 4. 시간 picker 입력
 # ──────────────────────────────────────────────
@@ -1171,7 +1190,7 @@ async def pick_time_via_wheel(page: Page, input_locator, time_value: str):
         return
 
     # 휠 렌더링 대기
-    await asyncio.sleep(0.6)
+    await asyncio.sleep(0.2)
 
     # 목표 transform 계산 (확인: 9시=-272 → 88-9*40=-272 ✅)
     hour_target = 88 - hour * 40
@@ -1208,31 +1227,11 @@ async def pick_time_via_wheel(page: Page, input_locator, time_value: str):
     hour_wheel = outer_el.locator(':scope > div[style*="transform"]').nth(0)
     min_wheel  = outer_el.locator(':scope > div[style*="transform"]').nth(1)
 
-    async def wheel_one_step(wheel_index: int, delta_y: int):
-        """WheelEvent 한 칸만 전송하고 스냅(200ms) 완료까지 대기"""
-        await page.evaluate(f"""
-            (function() {{
-                const sheet = document.querySelector('[data-slot="sheet-content"][data-state="open"]');
-                if (!sheet) return;
-                const outer = sheet.querySelector('div[style*="position: relative"][style*="display: flex"]');
-                if (!outer) return;
-                const wheels = outer.querySelectorAll(':scope > div[style*="transform"]');
-                const wheel = wheels[{wheel_index}];
-                if (!wheel) return;
-                wheel.dispatchEvent(new WheelEvent('wheel', {{
-                    bubbles: true, cancelable: true,
-                    deltaY: {delta_y}, deltaMode: 0,
-                }}));
-            }})()
-        """)
-        await asyncio.sleep(0.35)  # 스냅 타이머 200ms + 여유 150ms
-
     async def wheel_scroll(wheel_index: int, current_y: float, target_y: float):
         """
-        한 칸씩 이동 + 매 칸마다 스냅 완료 대기.
+        JS async 루프로 20ms 간격 발송 → React가 각 이벤트를 독립 처리.
+        동기 루프로 한꺼번에 보내면 React 18 자동 배칭으로 한 칸만 이동됨.
         deltaY=-40 → 숫자 증가, deltaY=+40 → 숫자 감소 (실험 확인)
-        9시→8시: diff=+40(>0) → 숫자감소 → deltaY=+40, steps=1
-        0분→30분: diff=-120(<0) → 숫자증가 → deltaY=-40, steps=3
         """
         diff = target_y - current_y
         if abs(diff) < 1:
@@ -1240,14 +1239,28 @@ async def pick_time_via_wheel(page: Page, input_locator, time_value: str):
         steps = round(abs(diff) / ITEM_H)
         delta_y = 40 if diff > 0 else -40
         print(f"      → wheel[{wheel_index}] {steps}칸 (deltaY:{delta_y}, diff:{diff:.0f})")
-        for i in range(steps):
-            await wheel_one_step(wheel_index, delta_y)
+        await page.evaluate(f"""
+            async () => {{
+                const sheet = document.querySelector('[data-slot="sheet-content"][data-state="open"]');
+                if (!sheet) return;
+                const outer = sheet.querySelector('div[style*="position: relative"][style*="display: flex"]');
+                if (!outer) return;
+                const wheels = outer.querySelectorAll(':scope > div[style*="transform"]');
+                const wheel = wheels[{wheel_index}];
+                if (!wheel) return;
+                for (let i = 0; i < {steps}; i++) {{
+                    wheel.dispatchEvent(new WheelEvent('wheel', {{
+                        bubbles: true, cancelable: true,
+                        deltaY: {delta_y}, deltaMode: 0,
+                    }}));
+                    await new Promise(r => setTimeout(r, 20));
+                }}
+            }}
+        """)
+        await asyncio.sleep(0.25)  # 스냅 타이머 200ms + 여유 50ms
 
     await wheel_scroll(0, wheel_data["hourCurrentY"], hour_target)
     await wheel_scroll(1, wheel_data["minCurrentY"],  min_target)
-    await asyncio.sleep(0.2)
-
-    await asyncio.sleep(0.5)
 
     # 확인 버튼 클릭
     try:
@@ -1259,7 +1272,7 @@ async def pick_time_via_wheel(page: Page, input_locator, time_value: str):
     try:
         await sheet.wait_for(state="hidden", timeout=3000)
     except: pass
-    await asyncio.sleep(0.3)
+    await asyncio.sleep(0.1)
 
 
 # ──────────────────────────────────────────────
