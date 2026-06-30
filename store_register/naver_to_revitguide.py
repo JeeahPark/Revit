@@ -99,7 +99,7 @@ async def scrape_naver_detail(context: BrowserContext, place_id: str) -> dict:
 
         data = {"place_id": place_id, "name": "", "phone": "", "address": "", "category": "", "hours": {}}
 
-        for sel in ["span.GHAhO", "h2.place_section_header", "span.Fc1rA", "h1"]:
+        for sel in ["span.IY7ZX", "span.GHAhO", "h2.place_section_header", "span.Fc1rA", "h1"]:
             try:
                 text = (await page.locator(sel).first.inner_text(timeout=3000)).strip()
                 if text:
@@ -138,7 +138,7 @@ async def scrape_naver_detail(context: BrowserContext, place_id: str) -> dict:
         # 영업시간 펼치기
         print("  ⏰ 영업시간 펼치기 시도...")
         try:
-            expand_btn = page.locator("span._UCia").filter(has_text="펼쳐보기")
+            expand_btn = page.locator("div.O8qbU.pSavy span._UCia").filter(has_text="펼쳐보기")
             await expand_btn.wait_for(state="visible", timeout=8000)
             await expand_btn.click(timeout=3000)
             try:
