@@ -27,6 +27,21 @@ SELECTORS = {
     "holiday_fallback": "span.A_cdD",
 }
 
+# 레빗가이드 등록 폼 셀렉터 (단일 관리 지점)
+# 폼 UI가 바뀌면 여기만 고치면 됨 - check_register_form.py로 검증 가능
+REGISTER_SELECTORS = {
+    "name_input": 'input[name="name"]',
+    "address_search_button": "button:has-text('주소 검색')",
+    "address_search_placeholder": "주소나 장소명을 입력하세요",
+    "address_search_result": "div.pointer-events-auto.flex.w-full.cursor-pointer",
+    "batch_register_button": "#detail-info > div.space-y-4 > div:nth-child(5) > div.flex.items-center.justify-between > button",
+    "holiday_add_button": "#detail-info > div.space-y-4 > div:nth-child(6) > div > button",
+}
+
+# 주소 검색어 뒷단어(층수, 상호명 등 검색에 안 잡히는 부가정보)를 하나씩 줄이며 재시도할 때
+# 뒤에서부터 최대 이 개수까지만 제거 (예: "...36 1 층과 3층" -> 3단어 제거해야 매칭됨)
+ADDRESS_SEARCH_MAX_STRIP = 3
+
 
 # ──────────────────────────────────────────────
 # 캐시 관리
@@ -722,7 +737,7 @@ async def handle_batch_registration(page: Page, time_blocks: list):
     """일괄등록 팝업을 통해 time_blocks 데이터를 입력"""
     
     # 일괄등록 버튼 클릭
-    batch_btn_selector = "#detail-info > div.space-y-4 > div:nth-child(5) > div.flex.items-center.justify-between > button"
+    batch_btn_selector = REGISTER_SELECTORS["batch_register_button"]
     
     try:
         await page.wait_for_selector(batch_btn_selector, timeout=10000)
@@ -789,7 +804,7 @@ async def handle_holiday_registration(page: Page, holiday_blocks: list):
     """holiday_blocks 데이터를 사용해서 정기휴무 등록"""
     
     # 정기휴무 추가 버튼 selector
-    add_holiday_btn_selector = "#detail-info > div.space-y-4 > div:nth-child(6) > div > button"
+    add_holiday_btn_selector = REGISTER_SELECTORS["holiday_add_button"]
     
     for i, block in enumerate(holiday_blocks):
         pattern = block.get('pattern', '매주')
@@ -1091,12 +1106,46 @@ async def register_store(page: Page, data: dict):
         print("  ⚠️ holiday_blocks 정보가 없어 정기휴무 자동입력 건너뜀")
 
 
+async def search_address_with_retry(page: Page, address_text: str):
+    """주소 검색 - '1층', '3층' 같은 부가정보가 검색에 안 걸리면 뒷단어를 하나씩 줄여가며 재시도.
+
+    예: "서울 중구 명동8가길 9-1 3층" 검색결과 없음
+        -> "서울 중구 명동8가길 9-1" 로 재검색 -> 성공
+    성공 시 결과 항목 로케이터를, 끝까지 실패하면 None을 반환한다.
+    """
+    words = address_text.split()
+    search_input = page.get_by_placeholder(REGISTER_SELECTORS["address_search_placeholder"])
+    await search_input.wait_for(state="visible", timeout=3000)
+
+    for strip_count in range(ADDRESS_SEARCH_MAX_STRIP + 1):
+        remaining = len(words) - strip_count
+        if remaining < 1:
+            break
+        query = " ".join(words[:remaining])
+        await search_input.fill("")
+        await search_input.fill(query)
+        await search_input.press("Enter")
+        try:
+            await page.wait_for_selector(REGISTER_SELECTORS["address_search_result"], timeout=4000)
+        except Exception:
+            await asyncio.sleep(0.5)
+
+        result_item = page.locator(REGISTER_SELECTORS["address_search_result"]).first
+        if await result_item.count() > 0:
+            if strip_count > 0:
+                dropped = words[remaining:]
+                print(f"    ℹ️ 뒷단어 {strip_count}개 제거 후 검색 성공: '{query}' (제거됨: {' '.join(dropped)})")
+            return result_item
+
+    return None
+
+
 async def fill_basic_info(page: Page, data: dict):
     """기본 정보 입력 (이름, 전화번호, 주소 등)"""
-    
+
     # 매장명
     if data.get('name'):
-        name_input = page.locator('input[name="name"]')
+        name_input = page.locator(REGISTER_SELECTORS["name_input"])
         await name_input.fill(data['name'])
         print(f"  📝 매장명: {data['name']}")
         
@@ -1120,28 +1169,15 @@ async def fill_basic_info(page: Page, data: dict):
             # 1. '주소 검색' 버튼 클릭
             # get_by_role("button", name=...)이 이 버튼을 못 찾아서(접근성 트리 계산 이슈로 추정)
             # 텍스트 기반 로케이터로 대체
-            search_trigger = page.locator("button:has-text('주소 검색')").first
+            search_trigger = page.locator(REGISTER_SELECTORS["address_search_button"]).first
             await search_trigger.wait_for(state="visible", timeout=5000)
             await search_trigger.click(force=True)
             await asyncio.sleep(0.5)
 
-            # 2. 주소 검색창 입력 (제공된 placeholder 전체 활용)
-            # HTML: "주소나 장소명을 입력하세요 (예: 역삼동 123-45, 강남역)"
-            search_input = page.get_by_placeholder("주소나 장소명을 입력하세요")
-            await search_input.wait_for(state="visible", timeout=3000)
-            await search_input.fill(address_text)
-            await search_input.press("Enter")
-            # 검색 결과 요소 등장 대기
-            try:
-                await page.wait_for_selector("div.pointer-events-auto.flex.w-full.cursor-pointer", timeout=5000)
-            except:
-                await asyncio.sleep(1.5)
+            # 2~3. 주소 검색 + 결과 선택 (뒷단어(층수 등) 제거 재시도 포함)
+            result_item = await search_address_with_retry(page, address_text)
 
-            # 3. 검색 결과 선택 (서랍 옵션 선택)
-            # 제공해주신 선택서랍 element의 클래스 조합을 사용합니다.
-            result_item = page.locator("div.pointer-events-auto.flex.w-full.cursor-pointer").first
-            
-            if await result_item.count() > 0:
+            if result_item:
                 await result_item.click()
                 print(f"    ✅ 검색 결과에서 주소 선택 완료")
             else:
@@ -1151,15 +1187,9 @@ async def fill_basic_info(page: Page, data: dict):
                 raise Exception("No search result found")
 
         except Exception as e:
-            print(f"  ⚠️ 주소 검색 자동화 실패 ({e}), 직접 입력 방식으로 전환")
-            try:
-                # 4. 직접 입력 Fallback (name="place.formatted" 속성 활용)
-                # HTML: <input name="place.formatted" ...>
-                direct_input = page.locator('input[name="place.formatted"]')
-                await direct_input.fill(address_text)
-                print(f"    📍 주소 직접 입력 완료: {address_text}")
-            except Exception as final_e:
-                print(f"    ❌ 주소 입력 최종 실패: {final_e}")
+            # 직접 입력 fallback(input[name="place.formatted"])은 폼 개편으로 제거되어
+            # 더 이상 존재하지 않음 - 검색 재시도가 실패하면 수동 입력 필요
+            print(f"  ❌ 주소 검색 실패 ({e}) - 주소를 수동으로 입력해주세요: {address_text}")
 
     await asyncio.sleep(0.3)
 # ──────────────────────────────────────────────
