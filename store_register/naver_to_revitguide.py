@@ -14,6 +14,19 @@ LOGIN_URL = "https://revitguide.com/login"
 CACHE_FILE = Path.home() / ".naver_revit_cache.json"
 SESSION_FILE = Path.home() / ".revitguide_session.json"
 
+# 네이버지도 상세페이지 크롤링 셀렉터 (단일 관리 지점)
+# 네이버가 클래스명을 바꾸면 여기만 고치면 됨 - check_selectors.py로 검증 가능
+SELECTORS = {
+    "name": ["span.IY7ZX", "span.GHAhO", "h2.place_section_header", "span.Fc1rA", "h1"],
+    "address": ["span.LDgIH", "span.pz7wy"],
+    "category": ["div.HzOD8:not(.Mwr0n) > span.dtDQt", "span.lnJFt", "span.DJJvD"],
+    "hours_expand_button": "div.O8qbU.pSavy span._UCia",
+    "hours_day": "span.i8cJw",
+    "hours_time": "div.H3ua4",
+    "holiday_container": "div.w9QyJ.yN6TD span.A_cdD",
+    "holiday_fallback": "span.A_cdD",
+}
+
 
 # ──────────────────────────────────────────────
 # 캐시 관리
@@ -97,9 +110,9 @@ async def scrape_naver_detail(context: BrowserContext, place_id: str) -> dict:
         except:
             await asyncio.sleep(1)
 
-        data = {"place_id": place_id, "name": "", "phone": "", "address": "", "category": "", "hours": {}}
+        data = {"place_id": place_id, "name": "", "address": "", "category": "", "hours": {}}
 
-        for sel in ["span.IY7ZX", "span.GHAhO", "h2.place_section_header", "span.Fc1rA", "h1"]:
+        for sel in SELECTORS["name"]:
             try:
                 text = (await page.locator(sel).first.inner_text(timeout=3000)).strip()
                 if text:
@@ -108,7 +121,7 @@ async def scrape_naver_detail(context: BrowserContext, place_id: str) -> dict:
                     break
             except: continue
 
-        for sel in ["span.LDgIH", "span.pz7wy"]:
+        for sel in SELECTORS["address"]:
             try:
                 text = (await page.locator(sel).first.inner_text(timeout=3000)).strip()
                 if text:
@@ -117,16 +130,7 @@ async def scrape_naver_detail(context: BrowserContext, place_id: str) -> dict:
                     break
             except: continue
 
-        for sel in ["span.xlx3X", "span.place_phone", "a.place_phone"]:
-            try:
-                text = (await page.locator(sel).first.inner_text(timeout=3000)).strip()
-                if text:
-                    data["phone"] = text
-                    print(f"  전화: {text}")
-                    break
-            except: continue
-
-        for sel in ["span.lnJFt", "span.DJJvD"]:
+        for sel in SELECTORS["category"]:
             try:
                 text = (await page.locator(sel).first.inner_text(timeout=3000)).strip()
                 if text:
@@ -138,11 +142,11 @@ async def scrape_naver_detail(context: BrowserContext, place_id: str) -> dict:
         # 영업시간 펼치기
         print("  ⏰ 영업시간 펼치기 시도...")
         try:
-            expand_btn = page.locator("div.O8qbU.pSavy span._UCia").filter(has_text="펼쳐보기")
+            expand_btn = page.locator(SELECTORS["hours_expand_button"]).filter(has_text="펼쳐보기")
             await expand_btn.wait_for(state="visible", timeout=8000)
             await expand_btn.click(timeout=3000)
             try:
-                await page.wait_for_selector("span.i8cJw", timeout=3000)
+                await page.wait_for_selector(SELECTORS["hours_day"], timeout=3000)
             except:
                 await asyncio.sleep(0.5)
             print("  ✅ 펼쳐보기 클릭")
@@ -150,9 +154,9 @@ async def scrape_naver_detail(context: BrowserContext, place_id: str) -> dict:
             print(f"  ⚠️ 펼치기 실패: {e}")
 
         try:
-            await page.wait_for_selector("span.i8cJw", timeout=5000)
-            day_items = await page.locator("span.i8cJw").all_inner_texts()
-            time_items = await page.locator("div.H3ua4").all_inner_texts()
+            await page.wait_for_selector(SELECTORS["hours_day"], timeout=5000)
+            day_items = await page.locator(SELECTORS["hours_day"]).all_inner_texts()
+            time_items = await page.locator(SELECTORS["hours_time"]).all_inner_texts()
             
             # 디버깅: 초기 데이터 확인
             print(f"  🔍 크롤링 원본 day_items: {day_items}")
@@ -163,8 +167,8 @@ async def scrape_naver_detail(context: BrowserContext, place_id: str) -> dict:
             
             # 정기휴무 정보 수집 (HTML 구조 기반)
             try:
-                # 정기휴무는 특별한 클래스를 가진 div에 있음: div.w9QyJ.yN6TD
-                holiday_elements = await page.locator("div.w9QyJ.yN6TD span.A_cdD").all()
+                # 정기휴무는 특별한 클래스를 가진 div에 있음
+                holiday_elements = await page.locator(SELECTORS["holiday_container"]).all()
                 for element in holiday_elements:
                     try:
                         holiday_text = await element.inner_text(timeout=1000)
@@ -181,7 +185,7 @@ async def scrape_naver_detail(context: BrowserContext, place_id: str) -> dict:
                         
                 # 추가로 일반적인 selector로도 시도
                 if not data["regular_holidays"]:
-                    all_a_elements = await page.locator("span.A_cdD").all()
+                    all_a_elements = await page.locator(SELECTORS["holiday_fallback"]).all()
                     for element in all_a_elements:
                         try:
                             text = await element.inner_text(timeout=500)
@@ -1113,9 +1117,10 @@ async def fill_basic_info(page: Page, data: dict):
         try:
             print(f"  🔍 주소 검색 시도: {address_text}")
             
-            # 1. '주소 검색' 버튼 클릭 (텍스트 기반 로케이터)
-            #의 구조를 유지하되 사용자 중심 로케이터로 변경
-            search_trigger = page.get_by_role("button", name="주소 검색")
+            # 1. '주소 검색' 버튼 클릭
+            # get_by_role("button", name=...)이 이 버튼을 못 찾아서(접근성 트리 계산 이슈로 추정)
+            # 텍스트 기반 로케이터로 대체
+            search_trigger = page.locator("button:has-text('주소 검색')").first
             await search_trigger.wait_for(state="visible", timeout=5000)
             await search_trigger.click(force=True)
             await asyncio.sleep(0.5)
